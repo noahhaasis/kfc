@@ -1,0 +1,15 @@
+fn ten(): i64 {
+    return 10;
+}
+
+fn fourtyTwo(): i64q {
+    return 52 - ten();
+}
+
+fn main(): i64 {
+    if (true) {
+        return fourtyTwo();
+    } else {
+        return ten();
+    }
+}

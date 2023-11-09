@@ -1,0 +1,35 @@
+fn sumToN(n: u64): u64 {
+	let res: u64 = 0;
+	let i: u64 = 1;
+	while (i <= n) {
+		res += i;
+		i += 1;
+	}
+	return res;
+}
+
+fn nonsense(b: bool): bool {
+    if (true) {
+        return false;
+    } else {
+        return true;
+    }
+}
+
+fn fib(n: u32): u64 {
+	if (n == 0 || n == 1) {
+		return 1;
+	}
+	return fib(n-1) + fib(n-2);
+}
+
+fn negate(n: i64): i64 {
+	return -n;
+}
+
+fn main(): i64 {
+	fib(4);
+	negate(1);
+
+	return 42;
+}
