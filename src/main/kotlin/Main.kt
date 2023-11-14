@@ -8,9 +8,11 @@ fun main(args: Array<String>) {
 //    val filename = args[1]
     val filename = "simple.kfc"
     val content = File(filename).readText()
-    val tokens = scan(content);
-    tokens.forEach { println(it) }
     val program = Parser(content).parse()
 
+    program.typecheck()
+
     File(filename.removeSuffix(".kfc") + ".s").writeText(program.compile())
+
+    println("Success!")
 }

@@ -1,3 +1,45 @@
+import java.util.Stack
+
+/*
+To simplify typechecking we'll assume there's only two types for now. i64 and bool.
+ */
+
+/* Next:
+    * Compile function calls
+        *
+    * Compile variables
+        * For each function build a map, mapping variables to their offset from the frame pointer
+    * Generate labels dynamically
+    * Compile && and ||
+    * Implement while compilation
+    * Sort functions in order or usage or declare symbols globally in assembler
+ */
+
+/*
+TODO: Handle this case
+Code generation can't handle this case.
+Maybe introduce a renaming pass?
+if (condition) {
+    let something = 10;
+else {
+    let something = 20;
+}
+ */
+
+object SymbolGenerator {
+    private var counter = 0
+    fun generateSymbol(name: String): String {
+        counter++
+        return "$name$counter"
+    }
+}
+
+sealed class RuntimeLocation {
+    data class Register(val name: String): RuntimeLocation()
+    data class Stack(val offset: Int): RuntimeLocation()
+}
+
+
 class TypecheckException(message: String): Exception(message)
 
 class Program(private val functions: Array<Function>) {
@@ -8,26 +50,144 @@ class Program(private val functions: Array<Function>) {
         functions.forEach { it.compile(sb) }
         return sb.toString()
     }
+    
+    fun typecheck() {
+        val typeEnvironment = TypeEnvironment()
+        typeEnvironment.pushScope() // Global scope
+        functions.forEach { typeEnvironment.declare(it.name, it.getType()) }
+        functions.forEach { it.typecheck(typeEnvironment) }
+    }
+}
+
+class TypeEnvironment {
+    private val scopes: Stack<MutableMap<String, Type>> = Stack()
+
+    fun get(identifier: String): Type {
+        scopes.forEach { if (it.containsKey(identifier)) return it[identifier]!! }
+        throw TypecheckException("Variable $identifier not found in environment")
+    }
+    
+    fun declare(identifier: String, type: Type) {
+        // Shadowing is not allowed
+        if (tryGet(identifier) != null) throw TypecheckException("Variable $identifier already declared")
+        scopes.peek()[identifier] = type
+    }
+    
+    fun pushScope() {
+        scopes.push(mutableMapOf())
+    }
+    
+    fun popScope() {
+        scopes.pop()
+    }
+    
+    fun runScoped(block: () -> Unit) {
+        pushScope()
+        block()
+        popScope()
+    }
+
+    private fun tryGet(identifier: String): Type? {
+        scopes.forEach { if (it.containsKey(identifier)) return it[identifier]!! }
+        return null
+    }
 }
 
 class Function(val name: String, val returnType: String, val params: Array<Pair<String, String>>, val body: Array<Statement>) {
+    companion object {
+        // TODO: Move out of here
+        fun constructVariableOffsets(declarations: Array<Statement.Decl>): Map<String, Int> {
+            val offsets = HashMap<String, Int>()
+            var offset = 0
+            for (i in declarations.indices) {
+                val decl = declarations[i]
+                val size = sizeOfType(decl.type)
+                if (offset % size != 0) { // Padding
+                    offset += size - (offset % size)
+                }
+                offset += sizeOfType(decl.type)
+                offsets[decl.name] = offset
+            }
+            return offsets
+        }
+
+        private fun sizeOfType(type: String): Int {
+            return when (type) {
+                "i64" -> 8
+                "bool" -> 1
+                else -> throw TypecheckException("Unknown type $type")
+            }
+        }
+    }
+
     fun compile(sb: StringBuilder) {
         sb.appendLine("_$name:")
+        // TODO: Don't just reserve 160 bytes. Only reserve as much as needed
         // allocate 16 byte for x29 and x30 and 160 bytes for local variables
         sb.appendLine("        sub sp, sp, #176")
         sb.appendLine("        stp x29, x30, [sp, #160]")
         sb.appendLine("        add x29, sp, #160") // the new frame pointer (x29) points to the beginning of the local variables.
-        body.forEach { it.compile(sb) }
+        val offsets = constructVariableOffsets(getAllDeclarations())
+        // TODO: Add arguments to the offset map
+        body.forEach { it.compile(sb, offsets) }
     }
+
+    private fun getAllDeclarations(): Array<Statement.Decl> {
+        val declarations = mutableListOf<Statement.Decl>()
+        visit(object : StatementVisitor {
+            override fun visit(statement: Statement.Decl) {
+                declarations.add(statement)
+            }
+
+            override fun visit(statement: Statement.Return) {}
+            override fun visit(statement: Statement.If) {}
+            override fun visit(statement: Statement.While) {}
+            override fun visit(statement: Statement.Expr) {}
+            override fun visit(statement: Statement.Assign) {}
+        })
+        return declarations.toTypedArray();
+    }
+
+    fun visit(visitor: StatementVisitor) {
+        body.forEach { it.visit(visitor) }
+    }
+
+    fun typecheck(typeEnvironment: TypeEnvironment) {
+        typeEnvironment.runScoped {
+            params.forEach { typeEnvironment.declare(it.first, Type.PrimitiveType(it.second)) }
+            body.forEach { it.typecheck(typeEnvironment, Type.PrimitiveType(returnType)) }
+        }
+    }
+
+    fun getType(): Type {
+        return Type.FunctionType(Type.PrimitiveType(returnType), params.map { Type.PrimitiveType(it.second) }.toTypedArray())
+    }
+}
+
+sealed class Type {
+    data class PrimitiveType(val name: String): Type()
+    data class FunctionType(val returnType: Type, val params: Array<Type>): Type()
+}
+
+interface StatementVisitor {
+    fun visit(statement: Statement.Return)
+    fun visit(statement: Statement.If)
+    fun visit(statement: Statement.While)
+    fun visit(statement: Statement.Expr)
+    fun visit(statement: Statement.Decl)
+    fun visit(statement: Statement.Assign)
 }
 
 sealed class Statement {
 
-    abstract fun compile(sb: StringBuilder)
+    abstract fun compile(sb: StringBuilder, environment: Map<String, Int>)
+    abstract fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type)
+
+    abstract fun visit(visitor: StatementVisitor)
 
     data class Return(val expr: Expression) : Statement() {
-        override fun compile(sb: StringBuilder) {
-            expr.compile(sb)
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            expr.compile(sb, environment)
             // Pop the return value into x0
             sb.appendLine("        ldr x0, [sp]")
             sb.appendLine("        add sp, sp, #16")
@@ -37,54 +197,155 @@ sealed class Statement {
             sb.appendLine("        add sp, sp, #176")
             sb.appendLine("        ret")
         }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
+            expr.typecheck(typeEnvironment)
+            if (expr.type!! != expectedReturnType) {
+                throw TypecheckException("Expected return type $expectedReturnType but got ${expr.type}")
+            }
+        }
+
+        override fun visit(visitor: StatementVisitor) {
+            visitor.visit(this)
+        }
     }
 
     data class If(val cond: Expression, val then: Array<Statement>, val _else: Array<Statement>? = null): Statement(){
-        override fun compile(sb: StringBuilder) {
-            cond.compile(sb)
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            val _endif: String = SymbolGenerator.generateSymbol("_endif")
+            val _elseSymbol: String = SymbolGenerator.generateSymbol("_else")
+            cond.compile(sb, environment)
             sb.appendLine("        ldr x0, [sp]")
             sb.appendLine("        add sp, sp, #16")
             sb.appendLine("        cmp x0, #0")
-            sb.appendLine("        b.eq ${if (_else != null) {"_else"} else {"_endif"}}")
-            then.forEach { it.compile(sb) }
-            sb.appendLine("        b _endif")
+            sb.appendLine("        b.eq ${if (_else != null) {"$_elseSymbol"} else {"$_endif"}}")
+            then.forEach { it.compile(sb, environment) }
+            sb.appendLine("        b $_endif")
             if (_else != null) {
-                sb.appendLine("_else:")
-                _else.forEach { it.compile(sb) }
+                sb.appendLine("$_elseSymbol:")
+                _else.forEach { it.compile(sb, environment) }
             }
-            sb.appendLine("_endif:")
+            sb.appendLine("$_endif:")
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
+            this.cond.typecheck(typeEnvironment)
+            if (this.cond.type!! != Type.PrimitiveType("bool")) {
+                throw TypecheckException("Expected condition of if statement to be of type bool, got ${this.cond.type}")
+            }
+
+            typeEnvironment.runScoped { this.then.map { it.typecheck(typeEnvironment, expectedReturnType) } }
+            if (this._else != null) {
+                typeEnvironment.runScoped { this._else.map { it.typecheck(typeEnvironment, expectedReturnType) } }
+            }
+        }
+
+        override fun visit(visitor: StatementVisitor) {
+            then.forEach { it.visit(visitor) }
+            _else?.forEach { it.visit(visitor) }
+            visitor.visit(this)
         }
     }
 
     data class While(val cond: Expression, val block: Array<Statement>): Statement() {
-        override fun compile(sb: StringBuilder) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
             sb.appendLine("_while:")
-            cond.compile(sb)
+            cond.compile(sb, environment)
             sb.appendLine("        ldr x0, [sp]")
             sb.appendLine("        add sp, sp, #16")
             sb.appendLine("        cmp x0, #0")
             sb.appendLine("        b.eq _endwhile")
-            block.forEach { it.compile(sb) }
+            block.forEach { it.compile(sb, environment) }
             sb.appendLine("        b _while")
             sb.appendLine("_endwhile:")
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
+            cond.typecheck(typeEnvironment)
+            if (cond.type!! != Type.PrimitiveType("bool")) {
+                throw TypecheckException("Expected condition of while statement to be of type bool, got ${cond.type}")
+            }
+
+            typeEnvironment.runScoped { block.map { it.typecheck(typeEnvironment, expectedReturnType) } }
+        }
+
+        override fun visit(visitor: StatementVisitor) {
+            block.forEach { it.visit(visitor) }
+            visitor.visit(this)
         }
     }
 
     data class Expr(val expr: Expression): Statement(){
-        override fun compile(sb: StringBuilder) {
-            expr.compile(sb)
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            expr.compile(sb, environment)
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
+            this.expr.typecheck(typeEnvironment)
+        }
+
+        override fun visit(visitor: StatementVisitor) {
+            visitor.visit(this)
         }
     }
 
     data class Decl(val name: String, val type: String, val expr: Expression): Statement() {
-        override fun compile(sb: StringBuilder) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            expr.compile(sb, environment)
 
+            val offset = environment[name]!!
+            when (type) {
+                "i64" -> {
+                    // pop the value into x8
+                    sb.appendLine("        ldr x8, [sp]")
+                    sb.appendLine("        add sp, sp, #16")
+                    // store x8 at offset from fp
+                    sb.appendLine("        str x8, [x29, #-$offset]")
+                }
+                else -> TODO()
+            }
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
+            expr.typecheck(typeEnvironment)
+            if (expr.type!! != Type.PrimitiveType(type)) {
+                throw TypecheckException("Expected type $type but got ${expr.type}")
+            }
+            typeEnvironment.declare(name, Type.PrimitiveType(type))
+        }
+
+        override fun visit(visitor: StatementVisitor) {
+            visitor.visit(this)
         }
     }
 
     data class Assign(val name: String, val expr: Expression): Statement() {
-        override fun compile(sb: StringBuilder) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            expr.compile(sb, environment)
 
+            val offset = environment[name]!!
+            when (expr.type) {
+                Type.PrimitiveType("i64") -> {
+                    // pop the value into x8
+                    sb.appendLine("        ldr x8, [sp]")
+                    sb.appendLine("        add sp, sp, #16")
+                    // store x8 at offset from fp
+                    sb.appendLine("        str x8, [x29, #-$offset]")
+                }
+                else -> TODO()
+            }
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
+            val varType = typeEnvironment.get(name)
+            expr.typecheck(typeEnvironment)
+            if (expr.type!! != varType) {
+                throw TypecheckException("Expected type $varType but got ${expr.type}")
+            }
+        }
+
+        override fun visit(visitor: StatementVisitor) {
+            visitor.visit(this)
         }
     }
 
@@ -126,81 +387,237 @@ enum class BinaryOperator {
     }
 }
 
-sealed class Expression {
+sealed class Expression(var type: Type?) {
     // The result of the expression is going to be on the top of the stack
-    abstract fun compile(sb: StringBuilder)
+    abstract fun compile(sb: StringBuilder, environment: Map<String, Int>)
 
-    data class Integer(val int: Int): Expression(){
-        override fun compile(sb: StringBuilder) {
+    // TODO: Return a optional type mismatch error and collect them
+    abstract fun typecheck(typeEnvironment: TypeEnvironment)
+
+    data class Integer(val int: Int): Expression(null){
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
             sb.appendLine("        sub sp, sp, #16")
             sb.appendLine("        mov x0, #$int")
             sb.appendLine("        str x0, [sp]")
         }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment) {
+            this.type = Type.PrimitiveType("i64")
+        }
     }
 
-    data class Boolean(val b: kotlin.Boolean): Expression() {
+    data class Boolean(val b: kotlin.Boolean): Expression(null) {
         // TODO: Doublecheck this generated code
-        override fun compile(sb: StringBuilder) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
             sb.appendLine("        sub sp, sp, #16")
             sb.appendLine("        mov x0, #${if (b) 1 else 0}")
             sb.appendLine("        str x0, [sp]")
         }
-    }
 
-    data class Variable(val identifier: String): Expression(){
-        override fun compile(sb: StringBuilder) {
-
+        override fun typecheck(typeEnvironment: TypeEnvironment) {
+            this.type = Type.PrimitiveType("bool")
         }
     }
 
-    data class Call(val function: String, val args: Array<Expression>): Expression(){
-        override fun compile(sb: StringBuilder) {
+    data class Variable(val identifier: String): Expression(null) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            val offset = environment[identifier]!!
+            sb.appendLine("        sub sp, sp, #16")
+            when (type) {
+                Type.PrimitiveType("i64") -> {
+                    sb.appendLine("        ldr x8, [x29, #-$offset]")
+                    sb.appendLine("        str x8, [sp]")
+                }
+                Type.PrimitiveType("bool") -> {
+                    sb.appendLine("        ldrb w8, [x29, #-$offset]")
+                    sb.appendLine("        str w8, [sp]")
+                }
+                else -> TODO()
+            }
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment) {
+            this.type = typeEnvironment.get(identifier)
+        }
+    }
+
+    data class Call(val function: String, val args: Array<Expression>): Expression(null) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
             sb.appendLine("        bl _$function")
             sb.appendLine("        sub sp, sp, #16")
             sb.appendLine("        str x0, [sp]")
         }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment) {
+            val functionType = typeEnvironment.get(function)
+            if (functionType !is Type.FunctionType) {
+                throw TypecheckException("Expected type FunctionType but got $functionType")
+            }
+            args.forEach { it.typecheck(typeEnvironment) }
+            functionType.params.zip(args.map { it.type!! }).forEach {
+                if (it.first != it.second) {
+                    throw TypecheckException("Expected type ${it.first} but got ${it.second}")
+                }
+            }
+            if (functionType.params.size != args.size) {
+                throw TypecheckException("Expected ${functionType.params.size} arguments but got ${args.size}")
+            }
+            this.type = functionType.returnType
+        }
     }
 
-    data class Binop(val op: BinaryOperator, val left: Expression, val right: Expression): Expression(){
-        override fun compile(sb: StringBuilder) {
-            left.compile(sb)
-            right.compile(sb)
+    data class Binop(val op: BinaryOperator, val left: Expression, val right: Expression): Expression(null) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            left.compile(sb, environment)
+            right.compile(sb, environment)
 
             // load operands
-            sb.appendLine("        ldr x1, [sp]")
-            sb.appendLine("        ldr x0, [sp, #16]")
+            sb.appendLine("        ldr x9, [sp]")
+            sb.appendLine("        ldr x8, [sp, #16]")
             when (op) {
                 BinaryOperator.ADD -> {
-                    sb.appendLine("        add x0, x0, x1")
+                    sb.appendLine("        add x8, x8, x9")
                 }
                 BinaryOperator.SUB -> {
-                    sb.appendLine("        sub x0, x0, x1")
+                    sb.appendLine("        sub x8, x8, x9")
                 }
                 BinaryOperator.MUL -> {
-                    sb.appendLine("        mul x0, x0, x1")
+                    sb.appendLine("        mul x8, x8, x9")
                 }
                 BinaryOperator.DIV -> {
-                    sb.appendLine("        udiv x0, x0, x1")
+                    sb.appendLine("        udiv x8, x8, x9")
                 }
-
-                else -> TODO()
+                BinaryOperator.AND -> {
+                    TODO()
+                }
+                BinaryOperator.OR -> {
+                    TODO()
+                }
+                BinaryOperator.EQUALS -> {
+                    TODO()
+                }
+                BinaryOperator.NOT_EQUALS -> {
+                    TODO()
+                }
+                BinaryOperator.GREATER_THAN -> {
+                    TODO()
+                }
+                BinaryOperator.GREATER_THAN_EQUAL -> {
+                    TODO()
+                }
+                BinaryOperator.LESS_THAN -> {
+                    TODO()
+                }
+                BinaryOperator.LESS_THAN_EQUAL -> {
+                    TODO()
+                }
             }
 
             // store result on stack
             sb.appendLine("        add sp, sp, #16")
-            sb.appendLine("        str x0, [sp]")
+            sb.appendLine("        str x8, [sp]")
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment) {
+
+            this.type = when (op) {
+                BinaryOperator.ADD -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("i64")
+                }
+                BinaryOperator.SUB -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("i64")
+                }
+                BinaryOperator.MUL -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("i64")
+                }
+                BinaryOperator.DIV -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("i64")
+                }
+                BinaryOperator.EQUALS -> {
+                    assertOperandTypesAreEqual(typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+                BinaryOperator.NOT_EQUALS -> {
+                    assertOperandTypesAreEqual(typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+                BinaryOperator.GREATER_THAN -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+                BinaryOperator.LESS_THAN -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+                BinaryOperator.LESS_THAN_EQUAL -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+                BinaryOperator.GREATER_THAN_EQUAL -> {
+                    assertOperandTypes(Type.PrimitiveType("i64"), Type.PrimitiveType("i64"), typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+                BinaryOperator.AND -> {
+                    assertOperandTypes(Type.PrimitiveType("bool"), Type.PrimitiveType("bool"), typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+                BinaryOperator.OR -> {
+                    assertOperandTypes(Type.PrimitiveType("bool"), Type.PrimitiveType("bool"), typeEnvironment)
+                    Type.PrimitiveType("bool")
+                }
+            }
+        }
+        
+        private fun assertOperandTypes(leftType: Type, rightType: Type, typeEnvironment: TypeEnvironment) {
+            this.left.typecheck(typeEnvironment)
+            this.right.typecheck(typeEnvironment)
+            if (this.left.type!! != leftType) {
+                throw TypecheckException("Expected type $leftType but got ${this.left.type}")
+            }
+            if (this.right.type!! != rightType) {
+                throw TypecheckException("Expected type $rightType but got ${this.right.type}")
+            }
+        }
+        
+        private fun assertOperandTypesAreEqual(typeEnvironment: TypeEnvironment) {
+            this.left.typecheck(typeEnvironment)
+            this.right.typecheck(typeEnvironment)
+            if (this.left.type!! != this.right.type!!) {
+                throw TypecheckException("Expected type ${this.left.type} but got ${this.right.type}")
+            }
         }
     }
 
-    data class UnaryMinus(val operand: Expression): Expression(){
-        override fun compile(sb: StringBuilder) {
+    data class UnaryMinus(val operand: Expression): Expression(null) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
 
+        }
+
+        override fun typecheck(typeEnvironment: TypeEnvironment) {
+            this.operand.typecheck(typeEnvironment)
+            if (this.operand.type!! != Type.PrimitiveType("i64")) {
+                throw TypecheckException("Expected type i64, got ${this.operand.type}")
+            }
+            this.type = Type.PrimitiveType("i64")
         }
     }
 
-    data class Negate(val operand: Expression): Expression(){
-        override fun compile(sb: StringBuilder) {
+    data class Negate(val operand: Expression): Expression(null) {
+        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+            operand.compile(sb, environment)
+            TODO()
+        }
 
+        override fun typecheck(typeEnvironment: TypeEnvironment) {
+            this.operand.typecheck(typeEnvironment)
+            if (this.operand.type!! != Type.PrimitiveType("bool")) {
+                throw TypecheckException("Expected type bool, got ${this.operand.type}")
+            }
+            this.type = Type.PrimitiveType("bool")
         }
     }
 }
