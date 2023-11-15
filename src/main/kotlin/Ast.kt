@@ -6,12 +6,10 @@ To simplify typechecking we'll assume there's only two types for now. i64 and bo
 
 /* Next:
     * Compile function calls
-        *
     * Compile variables
         * For each function build a map, mapping variables to their offset from the frame pointer
     * Generate labels dynamically
     * Compile && and ||
-    * Implement while compilation
     * Sort functions in order or usage or declare symbols globally in assembler
  */
 
@@ -45,7 +43,8 @@ class TypecheckException(message: String): Exception(message)
 class Program(private val functions: Array<Function>) {
     fun compile(): String {
         val sb = StringBuilder()
-        sb.appendLine("        .globl _main")
+        // Make all functions global for now
+        functions.forEach { sb.appendLine("        .globl _${it.name}") }
         sb.appendLine("        .p2align 2")
         functions.forEach { it.compile(sb) }
         return sb.toString()
@@ -215,10 +214,10 @@ sealed class Statement {
             val _endif: String = SymbolGenerator.generateSymbol("_endif")
             val _elseSymbol: String = SymbolGenerator.generateSymbol("_else")
             cond.compile(sb, environment)
-            sb.appendLine("        ldr x0, [sp]")
+            sb.appendLine("        ldrb w8, [sp]")
             sb.appendLine("        add sp, sp, #16")
-            sb.appendLine("        cmp x0, #0")
-            sb.appendLine("        b.eq ${if (_else != null) {"$_elseSymbol"} else {"$_endif"}}")
+            sb.appendLine("        cmp w8, #0")
+            sb.appendLine("        b.eq ${if (_else != null) { _elseSymbol} else {_endif }}")
             then.forEach { it.compile(sb, environment) }
             sb.appendLine("        b $_endif")
             if (_else != null) {
@@ -249,15 +248,17 @@ sealed class Statement {
 
     data class While(val cond: Expression, val block: Array<Statement>): Statement() {
         override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
-            sb.appendLine("_while:")
+            val _while = SymbolGenerator.generateSymbol("_while")
+            val _endwhile = SymbolGenerator.generateSymbol("_endwhile")
+            sb.appendLine("$_while:")
             cond.compile(sb, environment)
-            sb.appendLine("        ldr x0, [sp]")
+            sb.appendLine("        ldr x8, [sp]")
             sb.appendLine("        add sp, sp, #16")
-            sb.appendLine("        cmp x0, #0")
-            sb.appendLine("        b.eq _endwhile")
+            sb.appendLine("        cmp x8, #0")
+            sb.appendLine("        b.eq $_endwhile")
             block.forEach { it.compile(sb, environment) }
-            sb.appendLine("        b _while")
-            sb.appendLine("_endwhile:")
+            sb.appendLine("        b $_while")
+            sb.appendLine("$_endwhile:")
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
@@ -301,6 +302,11 @@ sealed class Statement {
                     sb.appendLine("        add sp, sp, #16")
                     // store x8 at offset from fp
                     sb.appendLine("        str x8, [x29, #-$offset]")
+                }
+                "bool" -> {
+                    sb.appendLine("        ldrb w8, [sp]")
+                    sb.appendLine("        add sp, sp, #16")
+                    sb.appendLine("        strb w8, [x29, #-$offset]")
                 }
                 else -> TODO()
             }
@@ -397,8 +403,8 @@ sealed class Expression(var type: Type?) {
     data class Integer(val int: Int): Expression(null){
         override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
             sb.appendLine("        sub sp, sp, #16")
-            sb.appendLine("        mov x0, #$int")
-            sb.appendLine("        str x0, [sp]")
+            sb.appendLine("        mov x8, #$int")
+            sb.appendLine("        str x8, [sp]")
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {
@@ -410,8 +416,8 @@ sealed class Expression(var type: Type?) {
         // TODO: Doublecheck this generated code
         override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
             sb.appendLine("        sub sp, sp, #16")
-            sb.appendLine("        mov x0, #${if (b) 1 else 0}")
-            sb.appendLine("        str x0, [sp]")
+            sb.appendLine("        mov w8, #${if (b) 1 else 0}")
+            sb.appendLine("        strb w8, [sp]")
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {
@@ -430,7 +436,7 @@ sealed class Expression(var type: Type?) {
                 }
                 Type.PrimitiveType("bool") -> {
                     sb.appendLine("        ldrb w8, [x29, #-$offset]")
-                    sb.appendLine("        str w8, [sp]")
+                    sb.appendLine("        strb w8, [sp]")
                 }
                 else -> TODO()
             }
@@ -474,18 +480,24 @@ sealed class Expression(var type: Type?) {
             // load operands
             sb.appendLine("        ldr x9, [sp]")
             sb.appendLine("        ldr x8, [sp, #16]")
+            // make space for the result
+            sb.appendLine("        add sp, sp, #16")
             when (op) {
                 BinaryOperator.ADD -> {
                     sb.appendLine("        add x8, x8, x9")
+                    sb.appendLine("        str x8, [sp]")
                 }
                 BinaryOperator.SUB -> {
                     sb.appendLine("        sub x8, x8, x9")
+                    sb.appendLine("        str x8, [sp]")
                 }
                 BinaryOperator.MUL -> {
                     sb.appendLine("        mul x8, x8, x9")
+                    sb.appendLine("        str x8, [sp]")
                 }
                 BinaryOperator.DIV -> {
                     sb.appendLine("        udiv x8, x8, x9")
+                    sb.appendLine("        str x8, [sp]")
                 }
                 BinaryOperator.AND -> {
                     TODO()
@@ -506,16 +518,16 @@ sealed class Expression(var type: Type?) {
                     TODO()
                 }
                 BinaryOperator.LESS_THAN -> {
-                    TODO()
+                    /* copied from godbolt */
+                    sb.appendLine("        subs x8, x8, x9")
+                    sb.appendLine("        cset w8, lt")
+                    sb.appendLine("        and w8, w8, #0x1")
+                    sb.appendLine("        strb w8, [sp]")
                 }
                 BinaryOperator.LESS_THAN_EQUAL -> {
                     TODO()
                 }
             }
-
-            // store result on stack
-            sb.appendLine("        add sp, sp, #16")
-            sb.appendLine("        str x8, [sp]")
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {
