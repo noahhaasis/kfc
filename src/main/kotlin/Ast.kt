@@ -5,12 +5,21 @@ To simplify typechecking we'll assume there's only two types for now. i64 and bo
  */
 
 /* Next:
-    * Only allocate the necessary amount of space for local variables
-    * Compile params
-    * Debug fac.kfc
+    * TODO: Is x8 the first temp register or x9?
+    * Debug fac.kfc DONE: The problem is that the exit code is between 0-255
     * Compile && and ||
+    * Nested calls. Need to save all used param registers on the stack and restore them afterwards
     * Write tests
+    * C FFI
+    * i32, u32, u64, f32, f64 (Better typechecking + more code generation)
+    * Don't use 16 bytes for every value on the stack
+    * Strings + Arrays (Garbage collection?)
     * Sort functions in order or usage or declare symbols globally in assembler
+ */
+
+// NOTE
+/*
+Factorial seems to work. The problem is that the exit code is only 1 byte;
  */
 
 /*
@@ -92,47 +101,64 @@ class TypeEnvironment {
     }
 }
 
-class FunctionCompilationContext(val environment: Map<String, Int>, val spaceForLocalVars: Int)
+class FunctionCompilationContext(val environment: Map<String, RuntimeLocation>, val spaceForLocalVars: Int)
 
 class Function(val name: String, val returnType: String, val params: Array<Pair<String, String>>, val body: Array<Statement>) {
-    companion object {
-        // TODO: Move out of here
-        fun constructVariableOffsetsAndSpace(declarations: Array<Statement.Decl>): FunctionCompilationContext {
-            val offsets = HashMap<String, Int>()
-            var offset = 0
-            for (i in declarations.indices) {
-                val decl = declarations[i]
-                val size = sizeOfType(decl.type)
-                if (offset % size != 0) { // Padding
-                    offset += size - (offset % size)
-                }
-                offset += sizeOfType(decl.type)
-                offsets[decl.name] = offset
-            }
-            val spaceNeededWithPadding = offset + (16 - (offset % 16))
-            return FunctionCompilationContext(offsets, spaceNeededWithPadding)
-        }
-
-        private fun sizeOfType(type: String): Int {
-            return when (type) {
-                "i64" -> 8
-                "bool" -> 1
-                else -> throw TypecheckException("Unknown type $type")
-            }
-        }
-    }
-
     fun compile(sb: StringBuilder) {
-        val functionCompilationContext = constructVariableOffsetsAndSpace(getAllDeclarations())
+        val functionCompilationContext = constructFunctionComputationContext()
+
         sb.appendLine("_$name:")
         // allocate 16 byte for x29 and x30 and and space for local variables (padded to 16 bytes)
         sb.appendLine("        sub sp, sp, #${16 + functionCompilationContext.spaceForLocalVars}")
         sb.appendLine("        stp x29, x30, [sp, #${functionCompilationContext.spaceForLocalVars}]")
         sb.appendLine("        add x29, sp, #${functionCompilationContext.spaceForLocalVars}") // the new frame pointer (x29) points to the beginning of the local variables.
-        // TODO: This offsets now needs to be used when returning
 
         // TODO: Add arguments to the offset map
         body.forEach { it.compile(sb, functionCompilationContext) }
+    }
+
+    fun visit(visitor: StatementVisitor) {
+        body.forEach { it.visit(visitor) }
+    }
+
+    fun typecheck(typeEnvironment: TypeEnvironment) {
+        typeEnvironment.runScoped {
+            params.forEach { typeEnvironment.declare(it.first, Type.PrimitiveType(it.second)) }
+            body.forEach { it.typecheck(typeEnvironment, Type.PrimitiveType(returnType)) }
+        }
+    }
+
+    fun getType(): Type {
+        return Type.FunctionType(Type.PrimitiveType(returnType), params.map { Type.PrimitiveType(it.second) }.toTypedArray())
+    }
+
+    private fun constructFunctionComputationContext(): FunctionCompilationContext {
+        // Map local variables to their offset to x29
+        val declarations = getAllDeclarations()
+        val environment = HashMap<String, RuntimeLocation>()
+        var offset = 0
+        for (i in declarations.indices) {
+            val decl = declarations[i]
+            val size = Type.sizeOfType(decl.type)
+            if (offset % size != 0) { // Padding
+                offset += size - (offset % size)
+            }
+            offset += Type.sizeOfType(decl.type)
+            environment[decl.name] = RuntimeLocation.Stack(offset)
+        }
+        val spaceNeededWithPadding = offset + (16 - (offset % 16))
+
+        // map parameters to registers
+        if (params.size > 8) {
+            TODO("Only up to 8 arguments are supported for now")
+        }
+        params.forEachIndexed() { index, param ->
+            val registerPrefix = if (Type.sizeOfType(param.second) > 4)  "x" else "w"
+            val register = "$registerPrefix${index}"
+            environment[param.first] = RuntimeLocation.Register(register)
+        }
+
+        return FunctionCompilationContext(environment, spaceNeededWithPadding)
     }
 
     private fun getAllDeclarations(): Array<Statement.Decl> {
@@ -150,26 +176,21 @@ class Function(val name: String, val returnType: String, val params: Array<Pair<
         })
         return declarations.toTypedArray();
     }
-
-    fun visit(visitor: StatementVisitor) {
-        body.forEach { it.visit(visitor) }
-    }
-
-    fun typecheck(typeEnvironment: TypeEnvironment) {
-        typeEnvironment.runScoped {
-            params.forEach { typeEnvironment.declare(it.first, Type.PrimitiveType(it.second)) }
-            body.forEach { it.typecheck(typeEnvironment, Type.PrimitiveType(returnType)) }
-        }
-    }
-
-    fun getType(): Type {
-        return Type.FunctionType(Type.PrimitiveType(returnType), params.map { Type.PrimitiveType(it.second) }.toTypedArray())
-    }
 }
 
 sealed class Type {
     data class PrimitiveType(val name: String): Type()
     data class FunctionType(val returnType: Type, val params: Array<Type>): Type()
+
+    companion object {
+        fun sizeOfType(type: String): Int {
+            return when (type) {
+                "i64" -> 8
+                "bool" -> 1
+                else -> throw TypecheckException("Unknown type $type")
+            }
+        }
+    }
 }
 
 interface StatementVisitor {
@@ -218,9 +239,9 @@ sealed class Statement {
             val _endif: String = SymbolGenerator.generateSymbol("_endif")
             val _elseSymbol: String = SymbolGenerator.generateSymbol("_else")
             cond.compile(sb, context.environment)
-            sb.appendLine("        ldrb w8, [sp]")
+            sb.appendLine("        ldrb w9, [sp]")
             sb.appendLine("        add sp, sp, #16")
-            sb.appendLine("        cmp w8, #0")
+            sb.appendLine("        cmp w9, #0")
             sb.appendLine("        b.eq ${if (_else != null) { _elseSymbol} else {_endif }}")
             then.forEach { it.compile(sb, context) }
             sb.appendLine("        b $_endif")
@@ -256,9 +277,9 @@ sealed class Statement {
             val _endwhile = SymbolGenerator.generateSymbol("_endwhile")
             sb.appendLine("$_while:")
             cond.compile(sb, context.environment)
-            sb.appendLine("        ldr x8, [sp]")
+            sb.appendLine("        ldr x9, [sp]")
             sb.appendLine("        add sp, sp, #16")
-            sb.appendLine("        cmp x8, #0")
+            sb.appendLine("        cmp x9, #0")
             sb.appendLine("        b.eq $_endwhile")
             block.forEach { it.compile(sb, context) }
             sb.appendLine("        b $_while")
@@ -283,6 +304,7 @@ sealed class Statement {
     data class Expr(val expr: Expression): Statement(){
         override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
             expr.compile(sb, context.environment)
+            sb.appendLine("        add sp, sp, #16")
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
@@ -298,19 +320,33 @@ sealed class Statement {
         override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
             expr.compile(sb, context.environment)
 
-            val offset = context.environment[name]!!
+            val location = context.environment[name]!!
             when (type) {
                 "i64" -> {
-                    // pop the value into x8
-                    sb.appendLine("        ldr x8, [sp]")
+                    // pop the value into x9
+                    sb.appendLine("        ldr x9, [sp]")
                     sb.appendLine("        add sp, sp, #16")
-                    // store x8 at offset from fp
-                    sb.appendLine("        str x8, [x29, #-$offset]")
+                    // store x9 at offset from fp
+                    when (location) {
+                        is RuntimeLocation.Register -> {
+                            sb.appendLine("        mov ${location.name}, x9")
+                        }
+                        is RuntimeLocation.Stack -> {
+                            sb.appendLine("        str x9, [x29, #-${location.offset}]")
+                        }
+                    }
                 }
                 "bool" -> {
-                    sb.appendLine("        ldrb w8, [sp]")
+                    sb.appendLine("        ldrb w9, [sp]")
                     sb.appendLine("        add sp, sp, #16")
-                    sb.appendLine("        strb w8, [x29, #-$offset]")
+                    when (location) {
+                        is RuntimeLocation.Register -> {
+                            sb.appendLine("        mov ${location.name}, w9")
+                        }
+                        is RuntimeLocation.Stack -> {
+                            sb.appendLine("        strb w9, [x29, #-${location.offset}]")
+                        }
+                    }
                 }
                 else -> TODO()
             }
@@ -331,16 +367,36 @@ sealed class Statement {
 
     data class Assign(val name: String, val expr: Expression): Statement() {
         override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
+            // TODO: Combine this with the code of Decl. It really is the same
             expr.compile(sb, context.environment)
 
-            val offset = context.environment[name]!!
-            when (expr.type) {
+            val location = context.environment[name]!!
+            when (expr.type!!) {
                 Type.PrimitiveType("i64") -> {
-                    // pop the value into x8
-                    sb.appendLine("        ldr x8, [sp]")
+                    // pop the value into x9
+                    sb.appendLine("        ldr x9, [sp]")
                     sb.appendLine("        add sp, sp, #16")
-                    // store x8 at offset from fp
-                    sb.appendLine("        str x8, [x29, #-$offset]")
+                    // store x9 at offset from fp
+                    when (location) {
+                        is RuntimeLocation.Register -> {
+                            sb.appendLine("        mov ${location.name}, x9")
+                        }
+                        is RuntimeLocation.Stack -> {
+                            sb.appendLine("        str x9, [x29, #-${location.offset}]")
+                        }
+                    }
+                }
+                Type.PrimitiveType("bool") -> {
+                    sb.appendLine("        ldrb w9, [sp]")
+                    sb.appendLine("        add sp, sp, #16")
+                    when (location) {
+                        is RuntimeLocation.Register -> {
+                            sb.appendLine("        mov ${location.name}, w9")
+                        }
+                        is RuntimeLocation.Stack -> {
+                            sb.appendLine("        strb w9, [x29, #-${location.offset}]")
+                        }
+                    }
                 }
                 else -> TODO()
             }
@@ -399,16 +455,16 @@ enum class BinaryOperator {
 
 sealed class Expression(var type: Type?) {
     // The result of the expression is going to be on the top of the stack
-    abstract fun compile(sb: StringBuilder, environment: Map<String, Int>)
+    abstract fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>)
 
     // TODO: Return a optional type mismatch error and collect them
     abstract fun typecheck(typeEnvironment: TypeEnvironment)
 
     data class Integer(val int: Int): Expression(null){
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+        override fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>) {
             sb.appendLine("        sub sp, sp, #16")
-            sb.appendLine("        mov x8, #$int")
-            sb.appendLine("        str x8, [sp]")
+            sb.appendLine("        mov x9, #$int")
+            sb.appendLine("        str x9, [sp]")
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {
@@ -417,11 +473,10 @@ sealed class Expression(var type: Type?) {
     }
 
     data class Boolean(val b: kotlin.Boolean): Expression(null) {
-        // TODO: Doublecheck this generated code
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+        override fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>) {
             sb.appendLine("        sub sp, sp, #16")
-            sb.appendLine("        mov w8, #${if (b) 1 else 0}")
-            sb.appendLine("        strb w8, [sp]")
+            sb.appendLine("        mov w9, #${if (b) 1 else 0}")
+            sb.appendLine("        strb w9, [sp]")
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {
@@ -430,17 +485,31 @@ sealed class Expression(var type: Type?) {
     }
 
     data class Variable(val identifier: String): Expression(null) {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
-            val offset = environment[identifier]!!
+        override fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>) {
+            val location = environment[identifier]!!
             sb.appendLine("        sub sp, sp, #16")
             when (type) {
                 Type.PrimitiveType("i64") -> {
-                    sb.appendLine("        ldr x8, [x29, #-$offset]")
-                    sb.appendLine("        str x8, [sp]")
+                    when (location) {
+                        is RuntimeLocation.Register -> {
+                            sb.appendLine("        mov x9, ${location.name} // Load param $identifier")
+                        }
+                        is RuntimeLocation.Stack -> {
+                            sb.appendLine("        ldr x9, [x29, #-${location.offset}] //  Load var $identifier")
+                        }
+                    }
+                    sb.appendLine("        str x9, [sp]")
                 }
                 Type.PrimitiveType("bool") -> {
-                    sb.appendLine("        ldrb w8, [x29, #-$offset]")
-                    sb.appendLine("        strb w8, [sp]")
+                    when (location) {
+                        is RuntimeLocation.Register -> {
+                            sb.appendLine("        mov w9, ${location.name} // Load param $identifier")
+                        }
+                        is RuntimeLocation.Stack -> {
+                            sb.appendLine("        ldrb w9, [x29, #-${location.offset}] // Load var $identifier")
+                        }
+                    }
+                    sb.appendLine("        strb w9, [sp]")
                 }
                 else -> TODO()
             }
@@ -452,7 +521,22 @@ sealed class Expression(var type: Type?) {
     }
 
     data class Call(val function: String, val args: Array<Expression>): Expression(null) {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+        override fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>) {
+            args.reversed().forEach { it.compile(sb, environment) }
+            for (i in args.size - 1 downTo 0) {
+                val arg = args[i]
+                when (arg.type) {
+                    Type.PrimitiveType("i64") -> {
+                        sb.appendLine("        ldr x$i, [sp]")
+                        sb.appendLine("        add sp, sp, #16")
+                    }
+                    Type.PrimitiveType("bool") -> {
+                        sb.appendLine("        ldrb w$i}, [sp]")
+                        sb.appendLine("        add sp, sp, #16")
+                    }
+                    else -> TODO()
+                }
+            }
             sb.appendLine("        bl _$function")
             sb.appendLine("        sub sp, sp, #16")
             sb.appendLine("        str x0, [sp]")
@@ -477,31 +561,31 @@ sealed class Expression(var type: Type?) {
     }
 
     data class Binop(val op: BinaryOperator, val left: Expression, val right: Expression): Expression(null) {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+        override fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>) {
             left.compile(sb, environment)
             right.compile(sb, environment)
 
             // load operands
-            sb.appendLine("        ldr x9, [sp]")
-            sb.appendLine("        ldr x8, [sp, #16]")
+            sb.appendLine("        ldr x10, [sp]")
+            sb.appendLine("        ldr x9, [sp, #16]")
             // make space for the result
             sb.appendLine("        add sp, sp, #16")
             when (op) {
                 BinaryOperator.ADD -> {
-                    sb.appendLine("        add x8, x8, x9")
-                    sb.appendLine("        str x8, [sp]")
+                    sb.appendLine("        add x9, x9, x10")
+                    sb.appendLine("        str x9, [sp]")
                 }
                 BinaryOperator.SUB -> {
-                    sb.appendLine("        sub x8, x8, x9")
-                    sb.appendLine("        str x8, [sp]")
+                    sb.appendLine("        sub x9, x9, x10")
+                    sb.appendLine("        str x9, [sp]")
                 }
                 BinaryOperator.MUL -> {
-                    sb.appendLine("        mul x8, x8, x9")
-                    sb.appendLine("        str x8, [sp]")
+                    sb.appendLine("        mul x9, x9, x10")
+                    sb.appendLine("        str x9, [sp]")
                 }
                 BinaryOperator.DIV -> {
-                    sb.appendLine("        udiv x8, x8, x9")
-                    sb.appendLine("        str x8, [sp]")
+                    sb.appendLine("        udiv x9, x9, x10")
+                    sb.appendLine("        str x9, [sp]")
                 }
                 BinaryOperator.AND -> {
                     TODO()
@@ -510,7 +594,11 @@ sealed class Expression(var type: Type?) {
                     TODO()
                 }
                 BinaryOperator.EQUALS -> {
-                    TODO()
+                    sb.appendLine("        subs x9, x9, x10")
+                    sb.appendLine("        cset w9, eq")
+                    sb.appendLine("        mov w10, #1")
+                    sb.appendLine("        and w9, w9, w10")
+                    sb.appendLine("        strb w9, [sp]")
                 }
                 BinaryOperator.NOT_EQUALS -> {
                     TODO()
@@ -523,10 +611,10 @@ sealed class Expression(var type: Type?) {
                 }
                 BinaryOperator.LESS_THAN -> {
                     /* copied from godbolt */
-                    sb.appendLine("        subs x8, x8, x9")
-                    sb.appendLine("        cset w8, lt")
-                    sb.appendLine("        and w8, w8, #0x1")
-                    sb.appendLine("        strb w8, [sp]")
+                    sb.appendLine("        subs x9, x9, x10")
+                    sb.appendLine("        cset w9, lt")
+                    sb.appendLine("        and w9, w9, #0x1")
+                    sb.appendLine("        strb w9, [sp]")
                 }
                 BinaryOperator.LESS_THAN_EQUAL -> {
                     TODO()
@@ -609,8 +697,8 @@ sealed class Expression(var type: Type?) {
     }
 
     data class UnaryMinus(val operand: Expression): Expression(null) {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
-
+        override fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>) {
+            TODO()
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {
@@ -623,7 +711,7 @@ sealed class Expression(var type: Type?) {
     }
 
     data class Negate(val operand: Expression): Expression(null) {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+        override fun compile(sb: StringBuilder, environment: Map<String, RuntimeLocation>) {
             operand.compile(sb, environment)
             TODO()
         }

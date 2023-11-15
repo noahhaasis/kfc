@@ -18,7 +18,7 @@ class Parser(source: String) {
         expect(Token.OpenParen)
 
         val params = mutableListOf<Pair<String, String>>()
-        if (peek() != Token.CloseParen) {
+        while (peek() != Token.CloseParen) {
             val paramName = expectIdentifier()
             expect(Token.Colon)
             val paramType = expectIdentifier()
