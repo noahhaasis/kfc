@@ -5,11 +5,11 @@ To simplify typechecking we'll assume there's only two types for now. i64 and bo
  */
 
 /* Next:
-    * Compile function calls
-    * Compile variables
-        * For each function build a map, mapping variables to their offset from the frame pointer
-    * Generate labels dynamically
+    * Only allocate the necessary amount of space for local variables
+    * Compile params
+    * Debug fac.kfc
     * Compile && and ||
+    * Write tests
     * Sort functions in order or usage or declare symbols globally in assembler
  */
 
@@ -92,10 +92,12 @@ class TypeEnvironment {
     }
 }
 
+class FunctionCompilationContext(val environment: Map<String, Int>, val spaceForLocalVars: Int)
+
 class Function(val name: String, val returnType: String, val params: Array<Pair<String, String>>, val body: Array<Statement>) {
     companion object {
         // TODO: Move out of here
-        fun constructVariableOffsets(declarations: Array<Statement.Decl>): Map<String, Int> {
+        fun constructVariableOffsetsAndSpace(declarations: Array<Statement.Decl>): FunctionCompilationContext {
             val offsets = HashMap<String, Int>()
             var offset = 0
             for (i in declarations.indices) {
@@ -107,7 +109,8 @@ class Function(val name: String, val returnType: String, val params: Array<Pair<
                 offset += sizeOfType(decl.type)
                 offsets[decl.name] = offset
             }
-            return offsets
+            val spaceNeededWithPadding = offset + (16 - (offset % 16))
+            return FunctionCompilationContext(offsets, spaceNeededWithPadding)
         }
 
         private fun sizeOfType(type: String): Int {
@@ -120,15 +123,16 @@ class Function(val name: String, val returnType: String, val params: Array<Pair<
     }
 
     fun compile(sb: StringBuilder) {
+        val functionCompilationContext = constructVariableOffsetsAndSpace(getAllDeclarations())
         sb.appendLine("_$name:")
-        // TODO: Don't just reserve 160 bytes. Only reserve as much as needed
-        // allocate 16 byte for x29 and x30 and 160 bytes for local variables
-        sb.appendLine("        sub sp, sp, #176")
-        sb.appendLine("        stp x29, x30, [sp, #160]")
-        sb.appendLine("        add x29, sp, #160") // the new frame pointer (x29) points to the beginning of the local variables.
-        val offsets = constructVariableOffsets(getAllDeclarations())
+        // allocate 16 byte for x29 and x30 and and space for local variables (padded to 16 bytes)
+        sb.appendLine("        sub sp, sp, #${16 + functionCompilationContext.spaceForLocalVars}")
+        sb.appendLine("        stp x29, x30, [sp, #${functionCompilationContext.spaceForLocalVars}]")
+        sb.appendLine("        add x29, sp, #${functionCompilationContext.spaceForLocalVars}") // the new frame pointer (x29) points to the beginning of the local variables.
+        // TODO: This offsets now needs to be used when returning
+
         // TODO: Add arguments to the offset map
-        body.forEach { it.compile(sb, offsets) }
+        body.forEach { it.compile(sb, functionCompilationContext) }
     }
 
     private fun getAllDeclarations(): Array<Statement.Decl> {
@@ -179,21 +183,21 @@ interface StatementVisitor {
 
 sealed class Statement {
 
-    abstract fun compile(sb: StringBuilder, environment: Map<String, Int>)
+    abstract fun compile(sb: StringBuilder, context: FunctionCompilationContext)
     abstract fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type)
 
     abstract fun visit(visitor: StatementVisitor)
 
     data class Return(val expr: Expression) : Statement() {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
-            expr.compile(sb, environment)
+        override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
+            expr.compile(sb, context.environment)
             // Pop the return value into x0
             sb.appendLine("        ldr x0, [sp]")
             sb.appendLine("        add sp, sp, #16")
 
             // restore fp, lr and sp
-            sb.appendLine("        ldp x29, x30, [sp, #160]")
-            sb.appendLine("        add sp, sp, #176")
+            sb.appendLine("        ldp x29, x30, [sp, #${context.spaceForLocalVars}]")
+            sb.appendLine("        add sp, sp, #${context.spaceForLocalVars+16}")
             sb.appendLine("        ret")
         }
 
@@ -210,19 +214,19 @@ sealed class Statement {
     }
 
     data class If(val cond: Expression, val then: Array<Statement>, val _else: Array<Statement>? = null): Statement(){
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+        override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
             val _endif: String = SymbolGenerator.generateSymbol("_endif")
             val _elseSymbol: String = SymbolGenerator.generateSymbol("_else")
-            cond.compile(sb, environment)
+            cond.compile(sb, context.environment)
             sb.appendLine("        ldrb w8, [sp]")
             sb.appendLine("        add sp, sp, #16")
             sb.appendLine("        cmp w8, #0")
             sb.appendLine("        b.eq ${if (_else != null) { _elseSymbol} else {_endif }}")
-            then.forEach { it.compile(sb, environment) }
+            then.forEach { it.compile(sb, context) }
             sb.appendLine("        b $_endif")
             if (_else != null) {
                 sb.appendLine("$_elseSymbol:")
-                _else.forEach { it.compile(sb, environment) }
+                _else.forEach { it.compile(sb, context) }
             }
             sb.appendLine("$_endif:")
         }
@@ -247,16 +251,16 @@ sealed class Statement {
     }
 
     data class While(val cond: Expression, val block: Array<Statement>): Statement() {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
+        override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
             val _while = SymbolGenerator.generateSymbol("_while")
             val _endwhile = SymbolGenerator.generateSymbol("_endwhile")
             sb.appendLine("$_while:")
-            cond.compile(sb, environment)
+            cond.compile(sb, context.environment)
             sb.appendLine("        ldr x8, [sp]")
             sb.appendLine("        add sp, sp, #16")
             sb.appendLine("        cmp x8, #0")
             sb.appendLine("        b.eq $_endwhile")
-            block.forEach { it.compile(sb, environment) }
+            block.forEach { it.compile(sb, context) }
             sb.appendLine("        b $_while")
             sb.appendLine("$_endwhile:")
         }
@@ -277,8 +281,8 @@ sealed class Statement {
     }
 
     data class Expr(val expr: Expression): Statement(){
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
-            expr.compile(sb, environment)
+        override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
+            expr.compile(sb, context.environment)
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
@@ -291,10 +295,10 @@ sealed class Statement {
     }
 
     data class Decl(val name: String, val type: String, val expr: Expression): Statement() {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
-            expr.compile(sb, environment)
+        override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
+            expr.compile(sb, context.environment)
 
-            val offset = environment[name]!!
+            val offset = context.environment[name]!!
             when (type) {
                 "i64" -> {
                     // pop the value into x8
@@ -326,10 +330,10 @@ sealed class Statement {
     }
 
     data class Assign(val name: String, val expr: Expression): Statement() {
-        override fun compile(sb: StringBuilder, environment: Map<String, Int>) {
-            expr.compile(sb, environment)
+        override fun compile(sb: StringBuilder, context: FunctionCompilationContext) {
+            expr.compile(sb, context.environment)
 
-            val offset = environment[name]!!
+            val offset = context.environment[name]!!
             when (expr.type) {
                 Type.PrimitiveType("i64") -> {
                     // pop the value into x8
@@ -583,7 +587,7 @@ sealed class Expression(var type: Type?) {
                 }
             }
         }
-        
+
         private fun assertOperandTypes(leftType: Type, rightType: Type, typeEnvironment: TypeEnvironment) {
             this.left.typecheck(typeEnvironment)
             this.right.typecheck(typeEnvironment)
@@ -594,7 +598,7 @@ sealed class Expression(var type: Type?) {
                 throw TypecheckException("Expected type $rightType but got ${this.right.type}")
             }
         }
-        
+
         private fun assertOperandTypesAreEqual(typeEnvironment: TypeEnvironment) {
             this.left.typecheck(typeEnvironment)
             this.right.typecheck(typeEnvironment)
