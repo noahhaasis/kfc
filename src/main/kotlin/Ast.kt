@@ -485,13 +485,13 @@ sealed class Expression(var type: Type?) {
                     compileArgs(cg)
                     cg.genAssembly("udiv x8, x8, x9")
                 }
-                BinaryOperator.AND -> {
-                    left.compile(cg)
-                    cg.pop(8, left.type!!)
-                    TODO()
+                BinaryOperator.AND -> { // TODO: Short circuiting
+                    compileArgs(cg)
+                    cg.genAssembly("and w8, w8, w9")
                 }
-                BinaryOperator.OR -> {
-                    TODO()
+                BinaryOperator.OR -> { // TODO: Short circuiting
+                    compileArgs(cg)
+                    cg.genAssembly("orr w8, w8, w9")
                 }
                 BinaryOperator.EQUALS -> {
                     compileArgs(cg)
