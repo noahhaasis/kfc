@@ -1,4 +1,4 @@
-extern fn printInt(i64): i64;
+extern fn printInt(i64): unit;
 
 fn fac(n: i64): i64 {
     let result: i64 = 1;

@@ -4,12 +4,10 @@ import java.util.Stack
 To simplify typechecking we'll assume there's only two types for now. i64 and bool.
  */
 
-/* Next:
-    * C FFI
+/* Next
     * Compile && and ||
     * Nested calls. Need to save all used param registers on the stack and restore them afterwards. (test: recursive fib)
     * Write tests
-    * void type
     * i32, u32, u64, f32, f64 (Better typechecking + more code generation)
     * Strings + Arrays (Garbage collection?)
  */
@@ -311,7 +309,9 @@ sealed class Statement {
     data class Expr(val expr: Expression): Statement(){
         override fun compile(cg: CodeGenerator) {
             expr.compile(cg)
-            cg.popIgnore()
+            if (expr.type != Type.PrimitiveType("unit")) {
+                cg.popIgnore()
+            }
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {
@@ -446,7 +446,9 @@ sealed class Expression(var type: Type?) {
             args.forEachIndexed { i, arg -> cg.pop(i, arg.type!!)} // Pop the result into registers
 
             cg.genAssembly("bl _$function")
-            cg.push(0, type!!) // Push the result onto the stack
+            if (type != Type.PrimitiveType("unit")) {
+                cg.push(0, type!!) // Push the result onto the stack
+            }
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {
