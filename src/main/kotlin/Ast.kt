@@ -180,6 +180,12 @@ sealed class Type {
     data class FunctionType(val returnType: Type, val params: Array<Type>): Type()
 
     companion object {
+        fun sizeOfType(type: Type): Int {
+            return when (type) {
+                is PrimitiveType -> sizeOfType(type.name)
+                is FunctionType -> TODO()
+            }
+        }
         fun sizeOfType(type: String): Int {
             return when (type) {
                 "i64" -> 8
@@ -295,7 +301,7 @@ sealed class Statement {
     data class Expr(val expr: Expression): Statement(){
         override fun compile(cg: CodeGenerator) {
             expr.compile(cg)
-            cg.popIgnore(expr.type!!)
+            cg.popIgnore()
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment, expectedReturnType: Type) {

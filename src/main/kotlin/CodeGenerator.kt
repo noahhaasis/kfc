@@ -1,39 +1,11 @@
+sealed class PopInstruction {
+    object RealPop : PopInstruction()
+    data class InternalPop(val newOffset: Int) : PopInstruction()
+}
+
 class CodeGenerator {
     fun setFunctionCompilationContext(functionCompilationContext: FunctionCompilationContext) {
         this.functionCompilationContext = functionCompilationContext
-    }
-
-    fun pop(register: Int, type: Type) {
-        when (type) {
-            Type.PrimitiveType("i64") -> {
-                genAssembly("ldr x$register, [sp]")
-                genAssembly("add sp, sp, #16")
-            }
-            Type.PrimitiveType("bool") -> {
-                genAssembly("ldrb w$register, [sp]")
-                genAssembly("add sp, sp, #16")
-            }
-            else -> TODO()
-        }
-    }
-
-    fun popIgnore(type: Type) {
-        genAssembly("add sp, sp, #16")
-    }
-
-    fun push(register: Int, type: Type) {
-        when (type) {
-            Type.PrimitiveType("i64") -> {
-                genAssembly("sub sp, sp, #16")
-                genAssembly("str x$register, [sp]")
-            }
-            Type.PrimitiveType("bool") -> {
-                genAssembly("sub sp, sp, #16")
-                genAssembly("strb w$register, [sp]")
-            }
-            else -> TODO()
-        }
-
     }
 
     fun storeIntoVar(name: String, type: Type) {
@@ -113,6 +85,63 @@ class CodeGenerator {
     fun generate(): String {
         return sb.toString()
     }
+
+    fun pop(register: Int, type: Type) {
+        when (type) {
+            Type.PrimitiveType("i64") -> {
+                genAssembly("ldr x$register, [sp, #$offsetInteralSpToSp]")
+            }
+            Type.PrimitiveType("bool") -> {
+                genAssembly("ldrb w$register, [sp, #$offsetInteralSpToSp]")
+            }
+            else -> TODO()
+        }
+
+        popIgnore()
+    }
+
+    fun popIgnore() {
+        val popInstruction = popStack.removeLast()
+        offsetInteralSpToSp = when (popInstruction) {
+            PopInstruction.RealPop -> {
+                genAssembly("add sp, sp, #16")
+                0
+            }
+            is PopInstruction.InternalPop -> {
+                popInstruction.newOffset
+            }
+        }
+    }
+
+    fun push(register: Int, type: Type) {
+        val numBytes = Type.sizeOfType(type)
+        if (offsetInteralSpToSp == 0 || offsetInteralSpToSp < numBytes) {
+            popStack.add(PopInstruction.RealPop)
+            genAssembly("sub sp, sp, #16")
+            offsetInteralSpToSp = 16 - numBytes
+        } else {
+            popStack.add(PopInstruction.InternalPop(offsetInteralSpToSp))
+            offsetInteralSpToSp -= numBytes
+            // Padding
+            offsetInteralSpToSp -= offsetInteralSpToSp % numBytes
+        }
+
+        when (type) {
+            Type.PrimitiveType("i64") -> {
+                genAssembly("str x$register, [sp, #$offsetInteralSpToSp]")
+            }
+            Type.PrimitiveType("bool") -> {
+                genAssembly("strb w$register, [sp, #$offsetInteralSpToSp]")
+            }
+            else -> TODO()
+        }
+    }
+
+    private val popStack: ArrayDeque<PopInstruction> = ArrayDeque()
+
+    // sp + offsetInteralSpToSp points to the top of the stack
+    // if offsetInternalSpToSp == 0 and we push then sp = sp-16
+    private var offsetInteralSpToSp = 0
 
     private val sb = StringBuilder()
 
