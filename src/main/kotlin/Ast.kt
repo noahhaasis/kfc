@@ -1,20 +1,16 @@
 import java.util.Stack
 
 /*
-To simplify typechecking we'll assume there's only two types for now. i64 and bool.
+To simplify typechecking we'll assume there's only three types for now. i64, bool and units.
  */
 
 /* Next
-    * Compile && and ||
-    * Nested calls. Need to save all used param registers on the stack and restore them afterwards. (test: recursive fib)
+    * Optimization: pass target register to expressions
+    * Compile && and || (short circuiting)
     * Write tests
+    * comments
     * i32, u32, u64, f32, f64 (Better typechecking + more code generation)
     * Strings + Arrays (Garbage collection?)
- */
-
-
-/* NOTE
-Factorial does work! Yay! The problem is that the exit code is only 1 byte;
  */
 
 /*
@@ -118,6 +114,8 @@ sealed class Function(val name: String) {
             cg.genAssembly("stp x29, x30, [sp, #${functionCompilationContext.spaceForLocalVars}]")
             cg.genAssembly("add x29, sp, #${functionCompilationContext.spaceForLocalVars}") // the new frame pointer (x29) points to the beginning of the local variables.
 
+            cg.saveArgumentsOnTheStack(params)
+
             body.forEach { it.compile(cg) }
         }
 
@@ -137,30 +135,28 @@ sealed class Function(val name: String) {
         }
 
         private fun constructFunctionComputationContext(): FunctionCompilationContext {
-            // Map local variables to their offset to x29
-            val declarations = getAllDeclarations()
             val environment = HashMap<String, RuntimeLocation>()
             var offset = 0
-            for (i in declarations.indices) {
-                val decl = declarations[i]
-                val size = Type.sizeOfType(decl.type)
-                if (offset % size != 0) { // Padding
-                    offset += size - (offset % size)
-                }
-                offset += Type.sizeOfType(decl.type)
-                environment[decl.name] = RuntimeLocation.Stack(offset)
-            }
-            val spaceNeededWithPadding = offset + (16 - (offset % 16))
 
-            // map parameters to registers
+            // arguments are saved on the stack so the function can call other functions
             if (params.size > 8) {
                 TODO("Only up to 8 arguments are supported for now")
             }
-            params.forEachIndexed { index, param ->
-                val registerPrefix = if (Type.sizeOfType(param.second) > 4)  "x" else "w"
-                val register = "$registerPrefix${index}"
-                environment[param.first] = RuntimeLocation.Register(register)
+
+            val paramsAndDecls = mutableListOf<Pair<String, String>>()
+            paramsAndDecls.addAll(params)
+            paramsAndDecls.addAll(getAllDeclarations().map { Pair(it.name, it.type) })
+
+            // Map local variables to their offset to x29
+            for (nameAndType in paramsAndDecls) {
+                val size = Type.sizeOfType(nameAndType.second)
+                if (offset % size != 0) { // Padding
+                    offset += size - (offset % size)
+                }
+                offset += Type.sizeOfType(nameAndType.second)
+                environment[nameAndType.first] = RuntimeLocation.Stack(offset)
             }
+            val spaceNeededWithPadding = offset + (16 - (offset % 16))
 
             return FunctionCompilationContext(environment, spaceNeededWithPadding)
         }
@@ -471,32 +467,34 @@ sealed class Expression(var type: Type?) {
 
     data class Binop(val op: BinaryOperator, val left: Expression, val right: Expression): Expression(null) {
         override fun compile(cg: CodeGenerator) {
-            left.compile(cg)
-            right.compile(cg)
-            cg.pop(9, right.type!!)
-            cg.pop(8, left.type!!)
-
             // TODO: Remove unnecessary pop and push
             when (op) {
                 BinaryOperator.ADD -> {
+                    compileArgs(cg)
                     cg.genAssembly("add x8, x8, x9")
                 }
                 BinaryOperator.SUB -> {
+                    compileArgs(cg)
                     cg.genAssembly("sub x8, x8, x9")
                 }
                 BinaryOperator.MUL -> {
+                    compileArgs(cg)
                     cg.genAssembly("mul x8, x8, x9")
                 }
                 BinaryOperator.DIV -> {
+                    compileArgs(cg)
                     cg.genAssembly("udiv x8, x8, x9")
                 }
                 BinaryOperator.AND -> {
+                    left.compile(cg)
+                    cg.pop(8, left.type!!)
                     TODO()
                 }
                 BinaryOperator.OR -> {
                     TODO()
                 }
                 BinaryOperator.EQUALS -> {
+                    compileArgs(cg)
                     // TODO: Equals on bools
                     cg.genAssembly("subs x8, x8, x9")
                     cg.genAssembly("cset w8, eq")
@@ -512,6 +510,7 @@ sealed class Expression(var type: Type?) {
                     TODO()
                 }
                 BinaryOperator.LESS_THAN -> {
+                    compileArgs(cg)
                     /* copied from godbolt */
                     cg.genAssembly("subs x8, x8, x9")
                     cg.genAssembly("cset w8, lt")
@@ -522,6 +521,13 @@ sealed class Expression(var type: Type?) {
                 }
             }
             cg.push(8, type!!)
+        }
+
+        fun compileArgs(cg: CodeGenerator) {
+            left.compile(cg)
+            right.compile(cg)
+            cg.pop(9, right.type!!)
+            cg.pop(8, left.type!!)
         }
 
         override fun typecheck(typeEnvironment: TypeEnvironment) {

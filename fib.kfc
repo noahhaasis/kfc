@@ -1,0 +1,20 @@
+extern fn printInt(i64): unit;
+
+fn fib(n: i64): i64 {
+  if (n == 0) {
+    return 1;
+  }
+  if (n == 1) {
+    return 1;
+  }
+  return fib(n-1) * fib(n-2);
+}
+
+fn main(): bool {
+  let result: i64 = fib(6);
+  printInt(result);
+  if (result == 720) {
+    return true;
+  }
+  return false;
+}

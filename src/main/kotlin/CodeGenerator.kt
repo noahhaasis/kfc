@@ -137,6 +137,22 @@ class CodeGenerator {
         }
     }
 
+    fun saveArgumentsOnTheStack(params: Array<Pair<String, String>>) {
+        params.forEachIndexed { i, param ->
+            val targetLocationOnStack = functionCompilationContext!!.environment[param.first]
+            if (targetLocationOnStack is RuntimeLocation.Stack) {
+                when (param.second) {
+                    "i64" -> genAssembly("str x${i}, [x29, #-${targetLocationOnStack.offset}]")
+                    "bool" -> genAssembly("strb w${i}, [x29, #-${targetLocationOnStack.offset}]")
+                    else -> throw TypecheckException("Unknown type ${param.second}")
+                }
+            } else {
+                TODO("Should not occur")
+            }
+        }
+    }
+
+    // TODO: I don't think this system can work with conditionals
     private val popStack: ArrayDeque<PopInstruction> = ArrayDeque()
 
     // sp + offsetInteralSpToSp points to the top of the stack
