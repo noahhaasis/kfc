@@ -7,13 +7,57 @@ class Parser(source: String) {
     fun parse(): Program {
         val functions = mutableListOf<Function>()
         while (peek() != Token.End) {
-            functions.add(function())
+            functions.add(functionOrExternFunction())
         }
         return Program(functions.toTypedArray())
     }
 
-    private fun function(): Function {
+    private fun functionOrExternFunction(): Function {
+        val token = next()
+        return when (token) {
+            is Token.Keyword -> {
+                when (token.keyword) {
+                    "fn" -> {
+                        function()
+                    }
+                    "extern" -> {
+                        externFunction()
+                    }
+                    else -> {
+                        throw ParsingException("Unreachable: Unknown identifier ${token.keyword}")
+                    }
+                }
+            }
+            else -> {
+                throw ParsingException("Unreachable: Unknown token $token")
+            }
+        }
+    }
+
+    private fun externFunction(): Function.ExternFunction {
+        // Keyword "extern" was already consumed
         expect(Token.Keyword("fn"))
+        val name = expectIdentifier().identifier
+        expect(Token.OpenParen)
+
+        val types: MutableList<String> = mutableListOf()
+        while (true) {
+            types.add(expectIdentifier().identifier)
+            if (peek() != Token.Comma) {
+                break
+            }
+        }
+        expect(Token.CloseParen)
+        expect(Token.Colon)
+
+        val returnType = expectIdentifier().identifier
+        expect(Token.Semicolon)
+
+        return Function.ExternFunction(name, returnType, types.toTypedArray())
+    }
+
+    private fun function(): Function.FunctionDef {
+        // Keyword "fn" was already consumed
         val name = expectIdentifier()
         expect(Token.OpenParen)
 
@@ -32,7 +76,7 @@ class Parser(source: String) {
         val returnType = expectIdentifier()
 
         val body = block()
-        return Function(name.identifier, returnType.identifier, params.toTypedArray(), body)
+        return Function.FunctionDef(name.identifier, returnType.identifier, params.toTypedArray(), body)
     }
 
     private fun block(): Array<Statement> {

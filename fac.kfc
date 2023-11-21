@@ -1,3 +1,5 @@
+extern fn printInt(i64): i64;
+
 fn fac(n: i64): i64 {
     let result: i64 = 1;
     let i: i64 = 2;
@@ -9,7 +11,9 @@ fn fac(n: i64): i64 {
 }
 
 fn main(): bool {
-  if (fac(6) == 720) {
+  let result: i64 = fac(6);
+  printInt(result);
+  if (result == 720) {
     return true;
   }
   return false;

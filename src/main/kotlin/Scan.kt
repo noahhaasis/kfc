@@ -67,7 +67,7 @@ class ScanException(message: String): RuntimeException(message)
 fun scan(source: String): Array<Token> {
     // TODO:
     // Check for array bounds
-    val keywords = arrayOf("fn", "if", "while", "return", "let", "else")
+    val keywords = arrayOf("fn", "if", "while", "return", "let", "else", "extern")
     val res = mutableListOf<Token>()
 
     var index = 0

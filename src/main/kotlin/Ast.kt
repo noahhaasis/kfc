@@ -5,12 +5,12 @@ To simplify typechecking we'll assume there's only two types for now. i64 and bo
  */
 
 /* Next:
+    * C FFI
     * Compile && and ||
     * Nested calls. Need to save all used param registers on the stack and restore them afterwards. (test: recursive fib)
     * Write tests
-    * C FFI
+    * void type
     * i32, u32, u64, f32, f64 (Better typechecking + more code generation)
-    * Don't use 16 bytes for every value on the stack
     * Strings + Arrays (Garbage collection?)
  */
 
@@ -50,9 +50,9 @@ class Program(private val functions: Array<Function>) {
     fun compile(): String {
         val cg = CodeGenerator()
         // Make all functions global for now
-        functions.forEach { cg.genAssemblyMeta(".globl _${it.name}") }
+        functions.filterIsInstance<Function.FunctionDef>().forEach { cg.genAssemblyMeta(".globl _${it.name}") }
         cg.genAssemblyMeta(".p2align 2")
-        functions.forEach { it.compile(cg) }
+        functions.filterIsInstance<Function.FunctionDef>().forEach { it.compile(cg) }
         return cg.generate()
     }
     
@@ -60,7 +60,7 @@ class Program(private val functions: Array<Function>) {
         val typeEnvironment = TypeEnvironment()
         typeEnvironment.pushScope() // Global scope
         functions.forEach { typeEnvironment.declare(it.name, it.getType()) }
-        functions.forEach { it.typecheck(typeEnvironment) }
+        functions.filterIsInstance<Function.FunctionDef>().forEach { it.typecheck(typeEnvironment) }
     }
 }
 
@@ -100,78 +100,88 @@ class TypeEnvironment {
 
 class FunctionCompilationContext(val environment: Map<String, RuntimeLocation>, val spaceForLocalVars: Int)
 
-class Function(val name: String, val returnType: String, val params: Array<Pair<String, String>>, val body: Array<Statement>) {
-    fun compile(cg: CodeGenerator) {
-        val functionCompilationContext = constructFunctionComputationContext()
-        cg.setFunctionCompilationContext(functionCompilationContext)
+sealed class Function(val name: String) {
+    abstract fun getType(): Type;
 
-        cg.genAssemblyMeta("_$name:")
-        // allocate 16 byte for x29 and x30 and and space for local variables (padded to 16 bytes)
-        cg.genAssembly("sub sp, sp, #${16 + functionCompilationContext.spaceForLocalVars}")
-        cg.genAssembly("stp x29, x30, [sp, #${functionCompilationContext.spaceForLocalVars}]")
-        cg.genAssembly("add x29, sp, #${functionCompilationContext.spaceForLocalVars}") // the new frame pointer (x29) points to the beginning of the local variables.
-
-        body.forEach { it.compile(cg) }
-    }
-
-    fun typecheck(typeEnvironment: TypeEnvironment) {
-        typeEnvironment.runScoped {
-            params.forEach { typeEnvironment.declare(it.first, Type.PrimitiveType(it.second)) }
-            body.forEach { it.typecheck(typeEnvironment, Type.PrimitiveType(returnType)) }
+    class ExternFunction(name: String, val returnType: String, val params: Array<String>): Function(name) {
+        override fun getType(): Type {
+            return Type.FunctionType(Type.PrimitiveType(returnType), params.map { Type.PrimitiveType(it) }.toTypedArray())
         }
     }
 
-    fun getType(): Type {
-        return Type.FunctionType(Type.PrimitiveType(returnType), params.map { Type.PrimitiveType(it.second) }.toTypedArray())
-    }
+    class FunctionDef(name: String, val returnType: String, val params: Array<Pair<String, String>>, val body: Array<Statement>): Function(name) {
+        fun compile(cg: CodeGenerator) {
+            val functionCompilationContext = constructFunctionComputationContext()
+            cg.setFunctionCompilationContext(functionCompilationContext)
 
-    private fun visit(visitor: StatementVisitor) {
-        body.forEach { it.visit(visitor) }
-    }
+            cg.genAssemblyMeta("_$name:")
+            // allocate 16 byte for x29 and x30 and and space for local variables (padded to 16 bytes)
+            cg.genAssembly("sub sp, sp, #${16 + functionCompilationContext.spaceForLocalVars}")
+            cg.genAssembly("stp x29, x30, [sp, #${functionCompilationContext.spaceForLocalVars}]")
+            cg.genAssembly("add x29, sp, #${functionCompilationContext.spaceForLocalVars}") // the new frame pointer (x29) points to the beginning of the local variables.
 
-    private fun constructFunctionComputationContext(): FunctionCompilationContext {
-        // Map local variables to their offset to x29
-        val declarations = getAllDeclarations()
-        val environment = HashMap<String, RuntimeLocation>()
-        var offset = 0
-        for (i in declarations.indices) {
-            val decl = declarations[i]
-            val size = Type.sizeOfType(decl.type)
-            if (offset % size != 0) { // Padding
-                offset += size - (offset % size)
+            body.forEach { it.compile(cg) }
+        }
+
+        fun typecheck(typeEnvironment: TypeEnvironment) {
+            typeEnvironment.runScoped {
+                params.forEach { typeEnvironment.declare(it.first, Type.PrimitiveType(it.second)) }
+                body.forEach { it.typecheck(typeEnvironment, Type.PrimitiveType(returnType)) }
             }
-            offset += Type.sizeOfType(decl.type)
-            environment[decl.name] = RuntimeLocation.Stack(offset)
-        }
-        val spaceNeededWithPadding = offset + (16 - (offset % 16))
-
-        // map parameters to registers
-        if (params.size > 8) {
-            TODO("Only up to 8 arguments are supported for now")
-        }
-        params.forEachIndexed { index, param ->
-            val registerPrefix = if (Type.sizeOfType(param.second) > 4)  "x" else "w"
-            val register = "$registerPrefix${index}"
-            environment[param.first] = RuntimeLocation.Register(register)
         }
 
-        return FunctionCompilationContext(environment, spaceNeededWithPadding)
-    }
+        override fun getType(): Type {
+            return Type.FunctionType(Type.PrimitiveType(returnType), params.map { Type.PrimitiveType(it.second) }.toTypedArray())
+        }
 
-    private fun getAllDeclarations(): Array<Statement.Decl> {
-        val declarations = mutableListOf<Statement.Decl>()
-        visit(object : StatementVisitor {
-            override fun visit(statement: Statement.Decl) {
-                declarations.add(statement)
+        private fun visit(visitor: StatementVisitor) {
+            body.forEach { it.visit(visitor) }
+        }
+
+        private fun constructFunctionComputationContext(): FunctionCompilationContext {
+            // Map local variables to their offset to x29
+            val declarations = getAllDeclarations()
+            val environment = HashMap<String, RuntimeLocation>()
+            var offset = 0
+            for (i in declarations.indices) {
+                val decl = declarations[i]
+                val size = Type.sizeOfType(decl.type)
+                if (offset % size != 0) { // Padding
+                    offset += size - (offset % size)
+                }
+                offset += Type.sizeOfType(decl.type)
+                environment[decl.name] = RuntimeLocation.Stack(offset)
+            }
+            val spaceNeededWithPadding = offset + (16 - (offset % 16))
+
+            // map parameters to registers
+            if (params.size > 8) {
+                TODO("Only up to 8 arguments are supported for now")
+            }
+            params.forEachIndexed { index, param ->
+                val registerPrefix = if (Type.sizeOfType(param.second) > 4)  "x" else "w"
+                val register = "$registerPrefix${index}"
+                environment[param.first] = RuntimeLocation.Register(register)
             }
 
-            override fun visit(statement: Statement.Return) {}
-            override fun visit(statement: Statement.If) {}
-            override fun visit(statement: Statement.While) {}
-            override fun visit(statement: Statement.Expr) {}
-            override fun visit(statement: Statement.Assign) {}
-        })
-        return declarations.toTypedArray();
+            return FunctionCompilationContext(environment, spaceNeededWithPadding)
+        }
+
+        private fun getAllDeclarations(): Array<Statement.Decl> {
+            val declarations = mutableListOf<Statement.Decl>()
+            visit(object : StatementVisitor {
+                override fun visit(statement: Statement.Decl) {
+                    declarations.add(statement)
+                }
+
+                override fun visit(statement: Statement.Return) {}
+                override fun visit(statement: Statement.If) {}
+                override fun visit(statement: Statement.While) {}
+                override fun visit(statement: Statement.Expr) {}
+                override fun visit(statement: Statement.Assign) {}
+            })
+            return declarations.toTypedArray();
+        }
     }
 }
 
