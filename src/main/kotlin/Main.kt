@@ -6,7 +6,7 @@ fun main(args: Array<String>) {
 //        exitProcess(1)
 //    }
 //    val filename = args[1]
-    val filename = "simple.kfc"
+    val filename = "fac.kfc"
     val content = File(filename).readText()
     val program = Parser(content).parse()
 
