@@ -41,11 +41,12 @@ class Parser(source: String) {
         expect(Token.OpenParen)
 
         val types: MutableList<String> = mutableListOf()
-        while (true) {
+        while (peek() != Token.CloseParen) {
             types.add(expectIdentifier().identifier)
             if (peek() != Token.Comma) {
                 break
             }
+            next() // Skip comma
         }
         expect(Token.CloseParen)
         expect(Token.Colon)
@@ -67,9 +68,10 @@ class Parser(source: String) {
             expect(Token.Colon)
             val paramType = expectIdentifier()
             params.add(Pair(paramName.identifier, paramType.identifier))
-            if (peek() == Token.Comma) {
-                next()
+            if (peek() != Token.Comma) {
+                break
             }
+            next() // Skip comma
         }
         expect(Token.CloseParen)
         expect(Token.Colon)
