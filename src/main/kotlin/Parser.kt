@@ -1,8 +1,10 @@
+
+
 class ParsingException(message: String): java.lang.RuntimeException(message) {
     constructor(expected: Token, got: Token) : this("Expected token $expected but got $got") {}
 }
 
-class Parser(source: String) {
+class Parser(filename: String, private val source: String) {
 
     fun parse(): Program {
         val functions = mutableListOf<Function>()
@@ -245,7 +247,8 @@ class Parser(source: String) {
 
     private fun factor(): Expression {
         // <integer> | <bool> | <identifier> | <function call> | ( <expr> ) | -<factor> | !<factor>
-        return when (val t = next()) {
+        val span = nextSpan()
+        return when (val t = span.item) {
             is Token.Integer -> {
                 Expression.Integer(t.value)
             }
@@ -258,7 +261,7 @@ class Parser(source: String) {
                     val args = mutableListOf<Expression>()
                     while (true) {
                         if (peek() == Token.CloseParen) {
-                            break;
+                            break
                         }
                         args.add(expr())
                         if (peek() == Token.Comma) {
@@ -283,49 +286,58 @@ class Parser(source: String) {
                 Expression.Negate(factor())
             }
             else -> {
-                throw ParsingException("Unexpected token $t")
+                errorReporter.report(span, "Unexpected token '$t'")
+                throw ParsingException("Unexpected token '$t'")
             }
         }
     }
 
     private fun next(): Token {
+        return nextSpan().item
+    }
+
+    private fun nextSpan(): Span<Token> {
         if (index >= tokens.size) {
-            return Token.End
+            return Span(source.length, source.length, Token.End)
         }
-        return tokens[index++];
+        return tokens[index++]
     }
 
     private fun expect(expected: Token): Token {
-        val got = next()
-        if (got != expected) {
-            throw ParsingException(expected, got)
+        val got = nextSpan()
+        if (got.item != expected) {
+            errorReporter.report(got, "Expected token $expected")
+            throw ParsingException(expected, got.item)
         }
-        return got
+        return got.item
 
     }
 
     private fun expectIdentifier(): Token.Identifier {
-        val got = next()
-        if (got is Token.Identifier) {
-            return got
+        val got = nextSpan()
+        if (got.item is Token.Identifier) {
+            return got.item
         }
-        throw ParsingException("Expected identifier but got $got")
+        errorReporter.report(got, "Expected identifier")
+        throw ParsingException("Expected identifier but got '${got.item}'")
     }
 
     private fun peek(): Token {
         if (index >= tokens.size) {
             return Token.End
         }
-        return tokens[index]
+        return tokens[index].item
     }
 
     private fun peek2(): Token {
         if (index + 1 >= tokens.size) {
             return Token.End
         }
-        return tokens[index + 1]
+        return tokens[index + 1].item
     }
 
-    private val tokens: Array<Token> = scan(source)
-    private var index = 0;
+    private val tokens: Array<Span<Token>> = scan(source)
+    private var index = 0
+
+    private val errorReporter = ErrorReporter(filename, source)
 }

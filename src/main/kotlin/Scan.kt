@@ -1,3 +1,6 @@
+// `start` is inclusive and `end` is exclusive
+class Span<A>(val start: Int, val end: Int, val item: A)
+
 sealed class Token {
 
     data class Identifier(val identifier: String) : Token()
@@ -8,19 +11,47 @@ sealed class Token {
 
     data class Bool(val value: Boolean): Token()
 
-    object Semicolon : Token()
+    object Semicolon : Token() {
+        override fun toString(): String {
+            return ";"
+        }
+    }
 
-    object OpenCurly : Token()
+    object OpenCurly : Token() {
+        override fun toString(): String {
+            return "{"
+        }
+    }
 
-    object CloseCurly : Token()
+    object CloseCurly : Token() {
+        override fun toString(): String {
+            return "}"
+        }
+    }
 
-    object Colon : Token()
+    object Colon : Token() {
+        override fun toString(): String {
+            return ":"
+        }
+    }
 
-    object Comma : Token()
+    object Comma : Token() {
+        override fun toString(): String {
+            return ","
+        }
+    }
 
-    object OpenParen : Token()
+    object OpenParen : Token() {
+        override fun toString(): String {
+            return "("
+        }
+    }
 
-    object CloseParen : Token()
+    object CloseParen : Token() {
+        override fun toString(): String {
+            return ")"
+        }
+    }
 
     object Minus: Token()
 
@@ -64,23 +95,24 @@ sealed class Token {
 
 class ScanException(message: String): RuntimeException(message)
 
-fun scan(source: String): Array<Token> {
+fun scan(source: String): Array<Span<Token>> {
     // TODO:
     // Check for array bounds
     val keywords = arrayOf("fn", "if", "while", "return", "let", "else", "extern")
-    val res = mutableListOf<Token>()
+    val res = mutableListOf<Span<Token>>()
 
     var index = 0
     while (index < source.length) {
         // Skip whitespace
         while (index < source.length && source[index].isWhitespace()) {
-            index++;
+            index++
         }
         if (index >= source.length)
-            break;
+            break
 
         var c = source[index]
 
+        val start = index
         val t: Token = when (c) {
             '{' -> {index++; Token.OpenCurly}
             '}' -> {index++; Token.CloseCurly}
@@ -159,7 +191,7 @@ fun scan(source: String): Array<Token> {
                     index++
                     Token.And
                 } else
-                    throw ScanException("Unexpected character $c");
+                    throw ScanException("Unexpected character $c")
             }
             '|' -> {
                 index++
@@ -167,7 +199,7 @@ fun scan(source: String): Array<Token> {
                     index++
                     Token.Or
                 } else
-                    throw ScanException("Unexpected character $c");
+                    throw ScanException("Unexpected character $c")
             }
             else -> {
                 if (c.isDigit()) {
@@ -176,7 +208,7 @@ fun scan(source: String): Array<Token> {
                         int *= 10
                         int += c.digitToInt()
 
-                        c = source[++index];
+                        c = source[++index]
                     }
 
                     Token.Integer(int)
@@ -187,9 +219,9 @@ fun scan(source: String): Array<Token> {
                     c = source[++index]
                     while (c.isLetterOrDigit()) {
                         sb.append(c)
-                        c = source[++index];
+                        c = source[++index]
                     }
-                    val literal = sb.toString();
+                    val literal = sb.toString()
 
                     if (literal in keywords) {
                         Token.Keyword(literal)
@@ -201,13 +233,14 @@ fun scan(source: String): Array<Token> {
                         Token.Identifier(literal)
                     }
                 } else {
-                    throw ScanException("Unexpected character $c");
+                    throw ScanException("Unexpected character $c")
                 }
             }
         }
-        res.add(t)
+        val end = index
+        res.add(Span(start, end, t))
     }
-    res.add(Token.End)
+    res.add(Span(index, index, Token.End))
 
     return res.toTypedArray()
 }

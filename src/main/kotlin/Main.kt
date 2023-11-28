@@ -6,9 +6,9 @@ fun main(args: Array<String>) {
 //        exitProcess(1)
 //    }
 //    val filename = args[1]
-    val filename = "fac.kfc"
+    val filename = "fib.kfc"
     val content = File(filename).readText()
-    val program = Parser(content).parse()
+    val program = Parser(filename, content).parse()
 
     program.typecheck()
 

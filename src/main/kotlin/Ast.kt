@@ -6,11 +6,13 @@ To simplify typechecking we'll assume there's only three types for now. i64, boo
 
 /* Next
     * Optimization: pass target register to expressions
+    * More than 8 arguments
     * Compile && and || (short circuiting)
     * Write tests
+    * Improve the parser error messages
     * comments
     * i32, u32, u64, f32, f64 (Better typechecking + more code generation)
-    * Strings + Arrays (Garbage collection?)
+    * Pointers! Strings + Arrays (Garbage collection?)
  */
 
 /*
@@ -49,7 +51,7 @@ class Program(private val functions: Array<Function>) {
         functions.filterIsInstance<Function.FunctionDef>().forEach { it.compile(cg) }
         return cg.generate()
     }
-    
+
     fun typecheck() {
         val typeEnvironment = TypeEnvironment()
         typeEnvironment.pushScope() // Global scope
@@ -65,21 +67,21 @@ class TypeEnvironment {
         scopes.forEach { if (it.containsKey(identifier)) return it[identifier]!! }
         throw TypecheckException("Variable $identifier not found in environment")
     }
-    
+
     fun declare(identifier: String, type: Type) {
         // Shadowing is not allowed
         if (tryGet(identifier) != null) throw TypecheckException("Variable $identifier already declared")
         scopes.peek()[identifier] = type
     }
-    
+
     fun pushScope() {
         scopes.push(mutableMapOf())
     }
-    
+
     fun popScope() {
         scopes.pop()
     }
-    
+
     fun runScoped(block: () -> Unit) {
         pushScope()
         block()
@@ -95,7 +97,7 @@ class TypeEnvironment {
 class FunctionCompilationContext(val environment: Map<String, RuntimeLocation>, val spaceForLocalVars: Int)
 
 sealed class Function(val name: String) {
-    abstract fun getType(): Type;
+    abstract fun getType(): Type
 
     class ExternFunction(name: String, val returnType: String, val params: Array<String>): Function(name) {
         override fun getType(): Type {
@@ -174,7 +176,7 @@ sealed class Function(val name: String) {
                 override fun visit(statement: Statement.Expr) {}
                 override fun visit(statement: Statement.Assign) {}
             })
-            return declarations.toTypedArray();
+            return declarations.toTypedArray()
         }
     }
 }
@@ -322,7 +324,7 @@ sealed class Statement {
     data class Decl(val name: String, val type: String, val expr: Expression): Statement() {
         override fun compile(cg: CodeGenerator) {
             expr.compile(cg)
-            
+
             cg.storeIntoVar(name, expr.type!!)
         }
 
