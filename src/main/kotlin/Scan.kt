@@ -1,6 +1,3 @@
-// `start` is inclusive and `end` is exclusive
-class Span<A>(val start: Int, val end: Int, val item: A)
-
 sealed class Token {
 
     data class Identifier(val identifier: String) : Token()
@@ -238,9 +235,9 @@ fun scan(source: String): Array<Span<Token>> {
             }
         }
         val end = index
-        res.add(Span(start, end, t))
+        res.add(Span(Location(start, end), t))
     }
-    res.add(Span(index, index, Token.End))
+    res.add(Span(Location(index, index), Token.End))
 
     return res.toTypedArray()
 }

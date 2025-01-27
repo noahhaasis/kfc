@@ -1,9 +1,9 @@
-class ErrorReporter(val filename: String, val source: String) {
-    fun report(got: Span<Token>, message: String) {
+class ErrorReporter(private val filename: String, private val source: String) {
+    fun report(t: Span<Token>, message: String) {
         // count lines until the token
         var lineCount = 1
         var posInLine = 0
-        for (i in 0 until  got.start) {
+        for (i in 0 until  t.location.start) {
             if (source[i] == '\n') {
                 lineCount++
                 posInLine = 0
@@ -11,9 +11,9 @@ class ErrorReporter(val filename: String, val source: String) {
                 posInLine++
             }
         }
-        val startOfLine = got.start - posInLine
+        val startOfLine = t.location.start - posInLine
         var endOfLine = 0
-        for (i in got.start until source.length) {
+        for (i in t.location.start until source.length) {
             if (source[i] == '\n') {
                 endOfLine = i
                 break
@@ -29,7 +29,7 @@ class ErrorReporter(val filename: String, val source: String) {
 
         println("$blue$filename:$reset")
         println(blue + prefix + reset + line)
-        println(" ".repeat(posInLine + prefix.length) + red + "^".repeat(got.end - got.start) + reset)
+        println(" ".repeat(posInLine + prefix.length) + red + "^".repeat(t.location.length()) + reset)
         println(red + message + reset)
     }
 }

@@ -1,5 +1,3 @@
-
-
 class ParsingException(message: String): java.lang.RuntimeException(message) {
     constructor(expected: Token, got: Token) : this("Expected token $expected but got $got") {}
 }
@@ -15,8 +13,7 @@ class Parser(filename: String, private val source: String) {
     }
 
     private fun functionOrExternFunction(): Function {
-        val token = next()
-        return when (token) {
+        return when (val token = next()) {
             is Token.Keyword -> {
                 when (token.keyword) {
                     "fn" -> {
@@ -94,75 +91,97 @@ class Parser(filename: String, private val source: String) {
     }
 
     private fun statement(): Statement {
-        return when (val t = peek()) {
-            is Token.Keyword ->
-                when (t.keyword) {
-                    "if" -> {
-                        next()
-                        expect(Token.OpenParen)
-                        val cond = expr()
-                        expect(Token.CloseParen)
-                        val then = block()
-
-                        if (peek() == Token.Keyword("else")) {
+        // TODO: Maybe wrap it in a try catch, store the error and find the next semicolon
+        try {
+            return when (val t = peek()) {
+                is Token.Keyword ->
+                    when (t.keyword) {
+                        "if" -> {
                             next()
-                            val elseBlock = block()
-                            Statement.If(cond, then, elseBlock)
-                        } else {
-                            Statement.If(cond, then)
+                            expect(Token.OpenParen)
+                            val cond = expr()
+                            expect(Token.CloseParen)
+                            val then = block()
+
+                            if (peek() == Token.Keyword("else")) {
+                                next()
+                                val elseBlock = block()
+                                Statement.If(cond, then, elseBlock)
+                            } else {
+                                Statement.If(cond, then)
+                            }
+                        }
+                        "while" -> {
+                            next()
+                            expect(Token.OpenParen)
+                            val cond = expr()
+                            expect(Token.CloseParen)
+                            val block = block()
+                            Statement.While(cond, block)
+                        }
+                        "return" -> {
+                            next()
+                            val statement = Statement.Return(expr())
+                            expect(Token.Semicolon)
+                            statement
+                        }
+                        "let" -> {
+                            next()
+                            val name = expectIdentifier()
+                            expect(Token.Colon)
+                            val type = expectIdentifier()
+                            expect(Token.Equal)
+                            val expr = expr()
+                            val statement = Statement.Decl(name.identifier, type.identifier, expr)
+                            expect(Token.Semicolon)
+                            statement
+                        }
+                        else -> {
+                            throw ParsingException("Unreachable: Unknown identifier ${t.keyword}")
                         }
                     }
-                    "while" -> {
-                        next()
-                        expect(Token.OpenParen)
-                        val cond = expr()
-                        expect(Token.CloseParen)
-                        val block = block()
-                        Statement.While(cond, block)
-                    }
-                    "return" -> {
-                        next()
-                        val statement = Statement.Return(expr())
-                        expect(Token.Semicolon)
-                        statement
-                    }
-                    "let" -> {
-                        next()
+                else -> {
+                    val peek2 = peek2()
+                    if (peek2 == Token.Equal || peek2 == Token.PlusEqual || peek2 == Token.MinusEqual || peek2 == Token.TimesEqual || peek2 == Token.DivEqual) {
                         val name = expectIdentifier()
-                        expect(Token.Colon)
-                        val type = expectIdentifier()
-                        expect(Token.Equal)
+                        next()
                         val expr = expr()
-                        val statement = Statement.Decl(name.identifier, type.identifier, expr)
+                        val statement = when (peek2) {
+                            Token.Equal -> Statement.Assign(name.identifier, expr)
+                            Token.PlusEqual -> Statement.Assign(
+                                name.identifier,
+                                Expression.Binop(BinaryOperator.ADD, Expression.Variable(name.identifier), expr)
+                            )
+                            Token.MinusEqual -> Statement.Assign(
+                                name.identifier,
+                                Expression.Binop(BinaryOperator.SUB, Expression.Variable(name.identifier), expr)
+                            )
+                            Token.TimesEqual -> Statement.Assign(
+                                name.identifier,
+                                Expression.Binop(BinaryOperator.MUL, Expression.Variable(name.identifier), expr)
+                            )
+                            Token.DivEqual -> Statement.Assign(
+                                name.identifier,
+                                Expression.Binop(BinaryOperator.DIV, Expression.Variable(name.identifier), expr)
+                            )
+                            else -> throw ParsingException("Unreachable: Unknown token $peek2")
+                        }
+                        expect(Token.Semicolon)
+                        statement
+                    } else {
+                        val statement = Statement.Expr(expr())
                         expect(Token.Semicolon)
                         statement
                     }
-                    else -> {
-                        throw ParsingException("Unreachable: Unknown identifier ${t.keyword}")
-                    }
-                }
-            else -> {
-                val peek2 = peek2()
-                if (peek2 == Token.Equal || peek2 == Token.PlusEqual || peek2 == Token.MinusEqual || peek2 == Token.TimesEqual || peek2 == Token.DivEqual) {
-                    val name = expectIdentifier()
-                    next()
-                    val expr = expr()
-                    val statement = when(peek2) {
-                        Token.Equal -> Statement.Assign(name.identifier, expr)
-                        Token.PlusEqual -> Statement.Assign(name.identifier, Expression.Binop(BinaryOperator.ADD, Expression.Variable(name.identifier), expr))
-                        Token.MinusEqual -> Statement.Assign(name.identifier, Expression.Binop(BinaryOperator.SUB, Expression.Variable(name.identifier), expr))
-                        Token.TimesEqual -> Statement.Assign(name.identifier, Expression.Binop(BinaryOperator.MUL, Expression.Variable(name.identifier), expr))
-                        Token.DivEqual -> Statement.Assign(name.identifier, Expression.Binop(BinaryOperator.DIV, Expression.Variable(name.identifier), expr))
-                        else -> throw ParsingException("Unreachable: Unknown token $peek2")
-                    }
-                    expect(Token.Semicolon)
-                    statement
-                } else {
-                    val statement = Statement.Expr(expr())
-                    expect(Token.Semicolon)
-                    statement
                 }
             }
+        } catch (e: ParsingException) {
+            // Find the next semicolon
+            while (peek() != Token.Semicolon && peek() != Token.End) {
+                next()
+            }
+            next() // Skip semicolon
+            return Statement.Expr(Expression.Integer(0)) // FIXME this is a hack
         }
     }
 
@@ -298,7 +317,7 @@ class Parser(filename: String, private val source: String) {
 
     private fun nextSpan(): Span<Token> {
         if (index >= tokens.size) {
-            return Span(source.length, source.length, Token.End)
+            return Span(Location(source.length, source.length), Token.End)
         }
         return tokens[index++]
     }
@@ -310,7 +329,6 @@ class Parser(filename: String, private val source: String) {
             throw ParsingException(expected, got.item)
         }
         return got.item
-
     }
 
     private fun expectIdentifier(): Token.Identifier {
